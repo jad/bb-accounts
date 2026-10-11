@@ -8,8 +8,8 @@ the account it started with.
   provider has more than one account. Your pick is remembered for that project.
 - A badge in the thread header that shows which account the thread runs on.
 - An **Accounts** section in Settings. Use it to add, rename, and remove
-  accounts, see who each one is logged in as, copy its login command, and set
-  per-project defaults.
+  accounts, log each one in with one click, see who it is logged in as, and
+  set per-project defaults.
 - A `bb accounts` command for the same tasks from a terminal or an agent.
 
 ## How it works

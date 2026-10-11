@@ -13,9 +13,10 @@ import {
   useComposer,
   useRealtime,
   useRpc,
+  UrlLink,
 } from "@get-bb/plugin-sdk/app";
 import type { PluginThreadHeaderActionProps } from "@get-bb/plugin-sdk/app";
-import type { AccountView, Snapshot, ThreadAccount, rpcContract } from "./server";
+import type { AccountView, LoginSession, Snapshot, ThreadAccount, rpcContract } from "./server";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -36,6 +37,7 @@ type ProviderId = AccountView["provider"];
 const PROVIDER_NAMES: Record<ProviderId, string> = { "claude-code": "Claude Code", codex: "Codex" };
 const PROVIDER_LIST: ProviderId[] = ["claude-code", "codex"];
 const CHANGED = "accounts-changed";
+const LOGIN_CHANGED = "accounts-login";
 
 function isProviderId(value: unknown): value is ProviderId {
   return value === "claude-code" || value === "codex";
@@ -251,13 +253,123 @@ function Select({
   );
 }
 
+/** Logins started from this page, kept current by the server. */
+function useLogins() {
+  const rpc = useRpc<typeof rpcContract>();
+  const [sessions, setSessions] = useState<LoginSession[]>([]);
+  const refetch = useCallback(() => {
+    rpc.call("login_list").then(setSessions, () => undefined);
+  }, [rpc]);
+  useEffect(refetch, [refetch]);
+  useRealtime(LOGIN_CHANGED, refetch);
+  // A login that just succeeded says so, then gets out of the way.
+  useEffect(() => {
+    for (const session of sessions) {
+      if (session.phase === "done") {
+        toast.success("Logged in");
+        void rpc.call("login_dismiss", { id: session.accountId });
+      }
+    }
+  }, [rpc, sessions]);
+  return sessions;
+}
+
+function LoginPanel({ session }: { session: LoginSession }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [code, setCode] = useState("");
+  const id = session.accountId;
+  const fail = (cause: unknown) => toast.error(errorText(cause));
+  if (session.phase === "failed" || session.phase === "cancelled") {
+    return (
+      <div className="flex items-start gap-2 rounded-md border border-border px-3 py-2 text-xs">
+        <span className={cn("min-w-0 flex-1", session.phase === "failed" && "text-destructive")}>
+          {session.phase === "cancelled" ? "Login cancelled." : `Login failed: ${session.message ?? "unknown error"}`}
+        </span>
+        <Button type="button" variant="ghost" size="sm" className="h-6 px-2" onClick={() => void rpc.call("login_dismiss", { id }).catch(fail)}>
+          Dismiss
+        </Button>
+      </div>
+    );
+  }
+  if (session.phase !== "waiting") return null;
+  return (
+    <div className="flex flex-col gap-2 rounded-md border border-border px-3 py-2 text-xs">
+      {session.provider === "claude-code" ? (
+        <>
+          <p>
+            A private browser window opened on the bb machine. Sign in there with the account you want; this
+            row updates when you finish.
+          </p>
+          {session.link === null ? null : (
+            <form
+              className="flex flex-wrap items-center gap-2 text-muted-foreground"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (code.trim() === "") return;
+                rpc.call("login_code", { id, code }).then(() => setCode(""), fail);
+              }}
+            >
+              <span>
+                Not at that computer? <UrlLink href={session.link} className="underline underline-offset-2">Open the sign-in page here</UrlLink>, then paste the code
+                it shows:
+              </span>
+              <Input
+                value={code}
+                onChange={(event) => setCode(event.target.value)}
+                placeholder="Code"
+                aria-label="Login code"
+                className="h-7 w-48 font-mono text-xs"
+              />
+              <Button type="submit" size="sm" className="h-7" disabled={code.trim() === ""}>
+                Submit
+              </Button>
+            </form>
+          )}
+        </>
+      ) : session.link === null || session.code === null ? (
+        <p>Starting Codex login…</p>
+      ) : (
+        <div className="flex flex-wrap items-center gap-2">
+          <span>
+            <UrlLink href={session.link} className="underline underline-offset-2">Open the Codex sign-in page</UrlLink> and enter this code:
+          </span>
+          <code className="rounded bg-muted px-2 py-0.5 font-mono text-sm tracking-wider">{session.code}</code>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-6 px-2"
+            aria-label="Copy code"
+            onClick={() => void experimental_copyToClipboard({ text: session.code! })}
+          >
+            <Icon name="Copy" className="size-3.5" />
+          </Button>
+          <span className="w-full text-muted-foreground">
+            If your browser is signed in to another ChatGPT account, open the page in a private window.
+          </span>
+        </div>
+      )}
+      <div className="flex items-center gap-2 text-muted-foreground">
+        <span className="min-w-0 flex-1">Waiting for you to finish signing in…</span>
+        <Button type="button" variant="ghost" size="sm" className="h-6 px-2" onClick={() => void rpc.call("login_cancel", { id }).catch(fail)}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function AccountRow({
   account,
   isGlobalDefault,
+  login,
+  onLogin,
   onRename,
   onRemove,
   onMakeDefault,
 }: {
+  login: LoginSession | null;
+  onLogin: () => void;
   account: AccountView;
   isGlobalDefault: boolean;
   onRename: (label: string) => void;
@@ -353,23 +465,36 @@ function AccountRow({
         <span className="font-mono">{account.dir}</span>
         <span className="font-mono">{account.id}</span>
       </div>
-      <div className="flex items-center gap-2">
-        <code className="min-w-0 flex-1 truncate rounded bg-muted px-2 py-1 text-xs">{account.loginCommand}</code>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-7"
-          onClick={() => {
-            void experimental_copyToClipboard({ text: account.loginCommand }).then((ok) =>
-              ok ? toast.success("Login command copied — run it in a terminal") : toast.error("Could not copy"),
-            );
-          }}
-        >
-          <Icon name="Copy" className="size-3.5" />
-          {needsLogin ? "Copy login command" : "Copy re-login command"}
-        </Button>
-      </div>
+      {login === null ? (
+        <div className="flex items-center gap-2">
+          <Button
+            type="button"
+            variant={needsLogin ? "default" : "outline"}
+            size="sm"
+            className="h-7"
+            onClick={onLogin}
+          >
+            <Icon name="ExternalLink" className="size-3.5" />
+            {needsLogin ? "Log in" : "Log in again"}
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 text-muted-foreground"
+            onClick={() => {
+              void experimental_copyToClipboard({ text: account.loginCommand }).then((ok) =>
+                ok ? toast.success("Command copied — run it in a terminal") : toast.error("Could not copy"),
+              );
+            }}
+          >
+            <Icon name="Copy" className="size-3.5" />
+            Copy terminal command
+          </Button>
+        </div>
+      ) : (
+        <LoginPanel session={login} />
+      )}
     </li>
   );
 }
@@ -441,6 +566,7 @@ function AddAccountForm({
 function AccountsSettings() {
   const { rpc, snapshot, refresh, refreshing } = useSnapshot();
   useRefreshOnFocus(refresh);
+  const logins = useLogins();
   const run = (promise: Promise<unknown>, success?: string) =>
     promise.then(
       () => (success === undefined ? undefined : toast.success(success)),
@@ -455,7 +581,7 @@ function AccountsSettings() {
       <div className="flex items-center gap-3">
         <p className="min-w-0 flex-1 text-xs text-muted-foreground">
           {loggedOut
-            ? "To log an account in, run its login command in a terminal. This page checks again when you come back."
+            ? "Some accounts are not logged in. Use Log in on the account below."
             : "Every account is logged in."}
         </p>
         <Button type="button" variant="outline" size="sm" className="h-7" disabled={refreshing} onClick={() => void refresh()}>
@@ -474,6 +600,8 @@ function AccountsSettings() {
                   key={account.id}
                   account={account}
                   isGlobalDefault={snapshot.globalDefaults[provider] === account.id}
+                  login={logins.find((l) => l.accountId === account.id && l.phase !== "done") ?? null}
+                  onLogin={() => void run(rpc.call("login_start", { id: account.id }))}
                   onRename={(label) => void run(rpc.call("rename_account", { id: account.id, label }))}
                   onRemove={() =>
                     void run(

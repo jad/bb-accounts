@@ -6,7 +6,7 @@
 // pin for life. Before every provider command, the env resolver hands the
 // pinned account's directory to the provider. Nothing here ever moves a thread
 // to another account on its own: there is no pooling or failover.
-import { readdir } from "node:fs/promises";
+import { mkdir, readdir } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -45,6 +45,7 @@ import {
   providerHome,
   suggestedDir,
 } from "./src/files";
+import { LoginManager, type LoginSession } from "./src/login";
 
 const accountViewSchema = z.object({
   id: z.string(),
@@ -78,6 +79,18 @@ const threadAccountSchema = z.object({
 });
 export type ThreadAccount = z.infer<typeof threadAccountSchema>;
 
+const loginSessionSchema = z.object({
+  accountId: z.string(),
+  provider: providerIdSchema,
+  phase: z.enum(["waiting", "done", "failed", "cancelled"]),
+  openedHere: z.boolean(),
+  link: z.string().nullable(),
+  code: z.string().nullable(),
+  message: z.string().nullable(),
+  startedAt: z.number(),
+});
+export type { LoginSession };
+
 export const rpcContract = defineRpcContract({
   snapshot: {
     /** `refresh` re-asks every CLI instead of using answers up to 30s old. */
@@ -107,6 +120,11 @@ export const rpcContract = defineRpcContract({
     }),
     output: z.null(),
   },
+  login_start: { input: z.object({ id: z.string() }), output: loginSessionSchema },
+  login_code: { input: z.object({ id: z.string(), code: z.string().trim().min(1).max(512) }), output: z.null() },
+  login_cancel: { input: z.object({ id: z.string() }), output: z.null() },
+  login_dismiss: { input: z.object({ id: z.string() }), output: z.null() },
+  login_list: { input: z.null(), output: z.array(loginSessionSchema) },
   thread_account: {
     input: z.object({ threadId: z.string() }),
     output: threadAccountSchema.nullable(),
@@ -115,6 +133,8 @@ export const rpcContract = defineRpcContract({
 
 /** Realtime channel: any account or default changed. */
 export const CHANGED = "accounts-changed";
+/** Realtime channel: a login started from bb changed; the payload is its LoginSession. */
+export const LOGIN_CHANGED = "accounts-login";
 
 const STATE_KEY = "state";
 
@@ -178,6 +198,24 @@ export default async function plugin(bb: BbPluginApi) {
     statusCache.set(key, { at: Date.now(), status });
     status.catch(() => statusCache.delete(key));
     return status;
+  }
+
+  const logins = new LoginManager((session) => {
+    bb.realtime.publish(LOGIN_CHANGED, session);
+    if (session.phase === "done") {
+      // The login just changed: the next look must ask the CLI again.
+      statusCache.clear();
+      bb.realtime.publish(CHANGED, {});
+      bb.log.info(`logged in ${session.accountId}`);
+    }
+  });
+  bb.onDispose(() => logins.dispose());
+
+  async function startLogin(id: string): Promise<LoginSession> {
+    const account = requireAccount(await readState(), id);
+    // Codex refuses a CODEX_HOME that does not exist; Claude would create it.
+    await mkdir(effectiveDir(account), { recursive: true, mode: 0o700 });
+    return logins.start(account);
   }
 
   async function view(state: State, account: Account, refresh = false): Promise<AccountView> {
@@ -396,6 +434,20 @@ export default async function plugin(bb: BbPluginApi) {
       await setDefault(provider, projectId, accountId);
       return null;
     },
+    login_start: ({ id }) => startLogin(id),
+    login_code: ({ id, code }) => {
+      logins.submitCode(id, code);
+      return null;
+    },
+    login_cancel: ({ id }) => {
+      logins.cancel(id);
+      return null;
+    },
+    login_dismiss: ({ id }) => {
+      logins.dismiss(id);
+      return null;
+    },
+    login_list: () => logins.list(),
     thread_account: ({ threadId }) => describeThread(threadId),
   });
 

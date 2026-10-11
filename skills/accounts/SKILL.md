@@ -32,9 +32,12 @@ fail over when a usage limit is hit.
   Use `--dir` only to adopt a folder that is already logged in, or a new or
   empty one; a folder with other files in it is refused. Settings always uses
   the standard folder.
-- `bb accounts login <account>`: print the login command for an account.
-  **The user must run it in their own terminal** because it opens a browser.
-  Never run it on the user's behalf.
+- `bb accounts login <account>`: print the terminal login command for an account.
+  Logging in needs the user's browser, so never run it on their behalf. Point
+  them to **Log in** on the account in Settings → Plugins → Accounts instead:
+  for Claude Code it opens a private browser window on the bb machine (with a
+  paste-a-code fallback for another device); for Codex it shows a device link
+  and one-time code that work from any device.
 - `bb accounts default <account> [--project <project>]`: the account new threads in
   that project (or, without `--project`, every project without its own choice) start on.
 - `bb accounts unset <claude|codex> --project <project>`: the project follows the global default again.
